@@ -86,7 +86,7 @@ MAIN_IV = base64.b64decode("Nm95WkRyMjJFM3ljaGpNJQ==")
 RELEASEVERSION = "OB55"
 USERAGENT = "UnityPlayer/2018.4.12f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)"
 LOGIN_URL = "https://loginbp.ppmainecoonghj.com/"
-INFO_API = "https://sheihk-info-ob55.onrender.com/Sheihk-info"
+INFO_API = "https://nxc-info-api.vercel.app/info"
 
 _http_client = httpx.Client(
     limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
